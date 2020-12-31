@@ -14,6 +14,8 @@ moment.tz.setDefault(localTimezone);
 
 type AlarmState = 'OK' | 'Alarm' | 'Insufficient';
 
+type GenerateGraphOptionsThreshold = 'lt' | 'gt' | 'gte' | 'lte' | 'eq';
+
 export interface GenerateGraphOptions {
   title?: string;
   chartWidth?: number;
@@ -25,6 +27,7 @@ export interface GenerateGraphOptions {
   }[];
   pointsLabel: string;
   alarmThresholdValue?: number;
+  alarmThresholdComparison?: GenerateGraphOptionsThreshold;
   startTime?: Date;
   endTime?: Date;
   points: { time: Date; value: number }[];
@@ -77,6 +80,7 @@ export interface CloudWatchMetricGraphOptions {
   dimensions?: CloudWatch.Dimension[];
   statistic: string;
   threshold?: number;
+  thresholdComparison?: GenerateGraphOptionsThreshold;
   startTime: Date;
   endTime: Date;
   period: number;
@@ -144,12 +148,30 @@ export async function getAWSCloudWatchAlarmGraphOptions(
   const endTime = moment();
   const startTime = moment(endTime).subtract(4, 'days');
 
+  let thresholdComparison: GenerateGraphOptionsThreshold | undefined;
+  switch (alarm.ComparisonOperator) {
+    case 'GreaterThanThreshold':
+      thresholdComparison = 'gt';
+      break;
+    case 'GreaterThanOrEqualToThreshold':
+      thresholdComparison = 'gte';
+      break;
+    case 'LessThanThreshold':
+      thresholdComparison = 'lt';
+      break;
+    case 'LessThanOrEqualToThreshold':
+      thresholdComparison = 'lte';
+      break;
+    default:
+  }
+
   const result = await getAWSCloudWatchMetricGraphOptions({
     metricName: alarm.MetricName,
     namespace: alarm.Namespace,
     statistic: alarm.Statistic,
     dimensions: alarm.Dimensions,
     threshold: alarm.Threshold,
+    thresholdComparison,
     region,
     startTime: startTime.toDate(),
     endTime: endTime.toDate(),
@@ -228,6 +250,13 @@ export async function generateGraph(
 
   // console.log(alarmStateData);
 
+  let thresholdFill: string | false = false;
+  if (options.alarmThresholdComparison === 'gt' || options.alarmThresholdComparison === 'gte') {
+    thresholdFill = 'end';
+  } else if (options.alarmThresholdComparison === 'lt' || options.alarmThresholdComparison === 'lte') {
+    thresholdFill = 'start';
+  }
+
   const configuration: Chart.ChartConfiguration = {
     type: 'line',
     data: {
@@ -246,9 +275,10 @@ export async function generateGraph(
           type: 'line',
           label: 'Threshold',
           borderColor: chartColors.red,
+          backgroundColor: color(chartColors.red).alpha(0.1).rgbString(),
+          fill: thresholdFill,
           borderWidth: 2,
           radius: 0,
-          fill: false,
           data:
             options.alarmThresholdValue !== undefined
               ? Array(options.points.length).fill(options.alarmThresholdValue)
@@ -278,6 +308,9 @@ export async function generateGraph(
           {
             id: 'default',
             display: true,
+            ticks: {
+              callback: (num: number) => num.toLocaleString('en'),
+            },
           },
           {
             id: 'alarm',
