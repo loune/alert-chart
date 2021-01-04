@@ -1,7 +1,7 @@
 import { CanvasRenderService } from 'chartjs-node-canvas';
 import Chart from 'chart.js';
 import moment from 'moment-timezone';
-import canvas from 'canvas';
+import Canvas from 'canvas';
 import { CloudWatch } from 'aws-sdk';
 import Stream from 'stream';
 
@@ -9,12 +9,18 @@ const localTimezone = 'Australia/Sydney';
 moment.tz.setDefault(localTimezone);
 
 ['CanvasRenderingContext2D', 'CanvasPattern', 'CanvasGradient'].forEach((obj) => {
-  (global as any)[obj] = (canvas as any)[obj];
+  (global as any)[obj] = (Canvas as any)[obj];
 });
 
 type AlarmState = 'OK' | 'Alarm' | 'Insufficient';
 
 type GenerateGraphOptionsThreshold = 'lt' | 'gt' | 'gte' | 'lte' | 'eq';
+
+const colors = {
+  red: 'rgb(255, 99, 132)',
+  red05: 'rgba(255, 99, 132, 0.5)',
+  blue: 'rgb(54, 162, 235)',
+};
 
 export interface GenerateGraphOptions {
   title?: string;
@@ -34,6 +40,16 @@ export interface GenerateGraphOptions {
   outputFormat?: 'stream' | 'buffer' | 'dataUri';
 }
 
+function getThresholdAreaPattern() {
+  const canvas = Canvas.createCanvas(32, 32);
+  const context = canvas.getContext('2d');
+  context.strokeStyle = colors.red05;
+  context.moveTo(32, 0);
+  context.lineTo(0, 32);
+  context.stroke();
+  return canvas;
+}
+
 function getCanvasRenderingService(width: number, height: number): CanvasRenderService {
   const canvasRenderService = new CanvasRenderService(width, height, (ChartJS) => {
     ChartJS.defaults.global.defaultFontColor = 'black';
@@ -45,6 +61,15 @@ function getCanvasRenderingService(width: number, height: number): CanvasRenderS
       },
     });
   });
+
+  // eslint-disable-next-line no-underscore-dangle
+  const originalCreateCanvas: any = (canvasRenderService as any)._createCanvas;
+  // eslint-disable-next-line no-underscore-dangle
+  (canvasRenderService as any)._createCanvas = (...args: any[]) => {
+    const canvas = originalCreateCanvas.apply(canvasRenderService, args);
+    (canvasRenderService as any).overrideConfigurationWithCanvas?.(canvas);
+    return canvas;
+  };
 
   return canvasRenderService;
 }
@@ -92,6 +117,7 @@ export async function getAWSCloudWatchMetricGraphOptions({
   statistic,
   dimensions,
   threshold,
+  thresholdComparison,
   region,
   startTime,
   endTime,
@@ -117,6 +143,7 @@ export async function getAWSCloudWatchMetricGraphOptions({
   return {
     title: `${namespace} ${metricName} ${formatDimensions(dimensions)}`,
     alarmThresholdValue: threshold,
+    alarmThresholdComparison: thresholdComparison,
     pointsLabel: data.Label || 'Metric',
     points: data.Datapoints.map((point) => ({
       time: point.Timestamp || new Date(),
@@ -131,9 +158,33 @@ const stateValueMap: { [key: string]: AlarmState } = {
   ALARM: 'Alarm',
 };
 
+function calculateAWSCloudWatchAlarmStartTime(endTime: moment.Moment, alarm: CloudWatch.MetricAlarm): moment.Moment {
+  const idealDataPoints = 100;
+  const day = 86400;
+  let timespan = day;
+  if (alarm.Period) {
+    if (alarm.EvaluationPeriods && alarm.Period * alarm.EvaluationPeriods * 4 > day) {
+      // show 4 times the evaluation periods, if greater than 1 day
+      timespan = alarm.Period * alarm.EvaluationPeriods * 2;
+    } else if (alarm.Period * idealDataPoints < day) {
+      // show at most 100 data points
+      timespan = alarm.Period * idealDataPoints;
+    }
+  }
+
+  return moment(endTime).subtract(timespan, 'seconds');
+}
+
+/**
+ *
+ * @param region AWS region
+ * @param alarmName name of AWS alarm
+ * @param graphTimespan timespan in seconds to generate graph. Default is auto.
+ */
 export async function getAWSCloudWatchAlarmGraphOptions(
   region: string,
   alarmName: string,
+  graphTimespan: number | undefined = undefined,
 ): Promise<GenerateGraphOptions | undefined> {
   const cloudWatch = new CloudWatch({ region });
   const alarms = await cloudWatch.describeAlarms({ AlarmNames: [alarmName] }).promise();
@@ -146,7 +197,10 @@ export async function getAWSCloudWatchAlarmGraphOptions(
   if (!alarm.MetricName || !alarm.Namespace || !alarm.Statistic) return undefined;
 
   const endTime = moment();
-  const startTime = moment(endTime).subtract(4, 'days');
+  // calculate start time
+  let startTime = graphTimespan
+    ? moment(endTime).subtract(graphTimespan, 'seconds')
+    : calculateAWSCloudWatchAlarmStartTime(endTime, alarm);
 
   let thresholdComparison: GenerateGraphOptionsThreshold | undefined;
   switch (alarm.ComparisonOperator) {
@@ -165,6 +219,38 @@ export async function getAWSCloudWatchAlarmGraphOptions(
     default:
   }
 
+  const alarmHistory = await cloudWatch
+    .describeAlarmHistory({
+      AlarmName: alarmName,
+      StartDate: startTime.toDate(),
+      HistoryItemType: 'StateUpdate',
+      ScanBy: 'TimestampAscending',
+    })
+    .promise();
+
+  const alarmStates = alarmHistory.AlarmHistoryItems?.map((historyItem) => {
+    const data = JSON.parse(historyItem.HistoryData || '{}');
+    // console.log(data);
+    const oldStateStartDate = data.oldState?.stateReasonData?.startDate
+      ? moment(data.oldState.stateReasonData.startDate)
+      : undefined;
+    const stateStartDate = data.newState?.stateReasonData?.startDate
+      ? moment(data.newState.stateReasonData.startDate)
+      : undefined;
+
+    if (oldStateStartDate && startTime.toDate().getTime() > oldStateStartDate.toDate().getTime()) {
+      startTime = oldStateStartDate;
+    } else if (stateStartDate && startTime.toDate().getTime() > stateStartDate.toDate().getTime()) {
+      startTime = stateStartDate;
+    }
+
+    return {
+      time: stateStartDate?.toDate() || historyItem.Timestamp || new Date(),
+      oldState: stateValueMap[data.oldState.stateValue],
+      newState: stateValueMap[data.newState.stateValue],
+    };
+  }).sort(sortHelper((x) => x.time.getTime()));
+
   const result = await getAWSCloudWatchMetricGraphOptions({
     metricName: alarm.MetricName,
     namespace: alarm.Namespace,
@@ -180,24 +266,7 @@ export async function getAWSCloudWatchAlarmGraphOptions(
 
   if (!result) return undefined;
 
-  const alarmHistory = await cloudWatch
-    .describeAlarmHistory({
-      AlarmName: alarmName,
-      StartDate: startTime.toDate(),
-      HistoryItemType: 'StateUpdate',
-      ScanBy: 'TimestampAscending',
-    })
-    .promise();
-
-  result.alarmStates = alarmHistory.AlarmHistoryItems?.map((historyItem) => {
-    const data = JSON.parse(historyItem.HistoryData || '{}');
-    return {
-      time: historyItem.Timestamp || new Date(),
-      oldState: stateValueMap[data.oldState.stateValue],
-      newState: stateValueMap[data.newState.stateValue],
-    };
-  }).sort(sortHelper((x) => x.time.getTime()));
-
+  result.alarmStates = alarmStates;
   result.title = `${alarmName} - ${result.title}`;
   result.startTime = startTime.toDate();
   result.endTime = endTime.toDate();
@@ -208,11 +277,6 @@ export async function getAWSCloudWatchAlarmGraphOptions(
 export async function generateGraph(
   options: GenerateGraphOptions,
 ): Promise<{ stream?: Stream; buffer?: Buffer; dataUri?: string }> {
-  const chartColors = {
-    red: 'rgb(255, 99, 132)',
-    blue: 'rgb(54, 162, 235)',
-  };
-
   const { color } = Chart.helpers;
 
   const labels = options.points.map((point) => point.time);
@@ -250,11 +314,30 @@ export async function generateGraph(
 
   // console.log(alarmStateData);
 
+  let suggestedMax: number | undefined;
+  let suggestedMin: number | undefined;
   let thresholdFill: string | false = false;
-  if (options.alarmThresholdComparison === 'gt' || options.alarmThresholdComparison === 'gte') {
-    thresholdFill = 'end';
-  } else if (options.alarmThresholdComparison === 'lt' || options.alarmThresholdComparison === 'lte') {
-    thresholdFill = 'start';
+  const threadholdMargin = 0.1;
+  if (options.alarmThresholdValue) {
+    const pointMax = options.points.reduce(
+      (accum, point) => (accum > point.value ? accum : point.value),
+      Number.MIN_VALUE,
+    );
+    const pointMin = options.points.reduce(
+      (accum, point) => (accum < point.value ? accum : point.value),
+      Number.MAX_VALUE,
+    );
+    if (options.alarmThresholdComparison === 'gt' || options.alarmThresholdComparison === 'gte') {
+      thresholdFill = 'end';
+      if (pointMax <= options.alarmThresholdValue) {
+        suggestedMax = options.alarmThresholdValue + (options.alarmThresholdValue - pointMin) * threadholdMargin;
+      }
+    } else if (options.alarmThresholdComparison === 'lt' || options.alarmThresholdComparison === 'lte') {
+      thresholdFill = 'start';
+      if (pointMin >= options.alarmThresholdValue) {
+        suggestedMin = options.alarmThresholdValue - (pointMax - options.alarmThresholdValue) * threadholdMargin;
+      }
+    }
   }
 
   const configuration: Chart.ChartConfiguration = {
@@ -266,16 +349,15 @@ export async function generateGraph(
           type: 'line',
           label: options.pointsLabel,
           lineTension: 0,
-          backgroundColor: color(chartColors.red).alpha(0).rgbString(),
-          borderColor: chartColors.blue,
+          backgroundColor: color(colors.red).alpha(0).rgbString(),
+          borderColor: colors.blue,
           data: options.points.map((point) => point.value),
           yAxisID: 'default',
         },
         {
           type: 'line',
           label: 'Threshold',
-          borderColor: chartColors.red,
-          backgroundColor: color(chartColors.red).alpha(0.1).rgbString(),
+          borderColor: colors.red,
           fill: thresholdFill,
           borderWidth: 2,
           radius: 0,
@@ -287,9 +369,9 @@ export async function generateGraph(
         {
           type: 'line',
           label: 'Alarm',
-          backgroundColor: color(chartColors.red).alpha(0.4).rgbString(),
+          backgroundColor: color(colors.red).alpha(0.4).rgbString(),
           borderWidth: 0,
-          borderColor: chartColors.red,
+          borderColor: colors.red,
           radius: 0,
           lineTension: 0,
           fill: 'start',
@@ -310,6 +392,8 @@ export async function generateGraph(
             display: true,
             ticks: {
               callback: (num: number) => num.toLocaleString('en'),
+              suggestedMin,
+              suggestedMax,
             },
           },
           {
@@ -357,6 +441,14 @@ export async function generateGraph(
     const dataUri = await canvasRenderService.renderToDataURL(configuration);
     return { dataUri };
   }
+
+  // hack to get access to the canvas context so we could create a pattern
+  (canvasRenderService as any).overrideConfigurationWithCanvas = (canvas: Canvas.Canvas) => {
+    const thresholdPattern = canvas.getContext('2d').createPattern(getThresholdAreaPattern(), 'repeat');
+    if (configuration.data && configuration.data.datasets) {
+      configuration.data.datasets[1].backgroundColor = thresholdPattern;
+    }
+  };
 
   const stream = canvasRenderService.renderToStream(configuration);
   return { stream };
