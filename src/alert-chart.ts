@@ -190,12 +190,13 @@ export async function getAWSCloudWatchAlarmGraphOptions(
   const alarms = await cloudWatch.describeAlarms({ AlarmNames: [alarmName] }).promise();
   // console.log(alarms);
 
-  if (!alarms.MetricAlarms?.length) throw new Error(`Alarm name ${alarmName} not found`);
+  if (!alarms.MetricAlarms?.length) throw new Error(`Alarm ${alarmName} not found in ${region}.`);
 
   const alarm = alarms.MetricAlarms[0];
   // console.log(alarm);
-  if (!alarm.MetricName || !alarm.Namespace || !alarm.Statistic)
-    throw new Error(`Alarm ${alarmName} MetricName, Namespace or Statistic is not defined`);
+  if (!alarm.MetricName || !alarm.Namespace || !alarm.Statistic) {
+    throw new Error(`Alarm ${alarmName} MetricName, Namespace or Statistic is not defined.`);
+  }
 
   const endTime = moment();
   // calculate start time
