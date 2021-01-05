@@ -122,7 +122,7 @@ export async function getAWSCloudWatchMetricGraphOptions({
   startTime,
   endTime,
   period,
-}: CloudWatchMetricGraphOptions): Promise<GenerateGraphOptions | undefined> {
+}: CloudWatchMetricGraphOptions): Promise<GenerateGraphOptions> {
   // console.log(arguments[0]);
 
   const cloudWatch = new CloudWatch({ region });
@@ -138,17 +138,17 @@ export async function getAWSCloudWatchMetricGraphOptions({
     })
     .promise();
 
-  if (!data.Datapoints) return undefined;
-
   return {
     title: `${namespace} ${metricName} ${formatDimensions(dimensions)}`,
     alarmThresholdValue: threshold,
     alarmThresholdComparison: thresholdComparison,
     pointsLabel: data.Label || 'Metric',
-    points: data.Datapoints.map((point) => ({
-      time: point.Timestamp || new Date(),
-      value: (point as any)[statistic] !== undefined ? (point as any)[statistic] : NaN,
-    })).sort(sortHelper((x) => x.time.getTime())),
+    points: data.Datapoints
+      ? data.Datapoints.map((point) => ({
+          time: point.Timestamp || new Date(),
+          value: (point as any)[statistic] !== undefined ? (point as any)[statistic] : NaN,
+        })).sort(sortHelper((x) => x.time.getTime()))
+      : [],
   };
 }
 
@@ -185,16 +185,17 @@ export async function getAWSCloudWatchAlarmGraphOptions(
   region: string,
   alarmName: string,
   graphTimespan: number | undefined = undefined,
-): Promise<GenerateGraphOptions | undefined> {
+): Promise<GenerateGraphOptions> {
   const cloudWatch = new CloudWatch({ region });
   const alarms = await cloudWatch.describeAlarms({ AlarmNames: [alarmName] }).promise();
   // console.log(alarms);
 
-  if (!alarms.MetricAlarms?.length) return undefined;
+  if (!alarms.MetricAlarms?.length) throw new Error(`Alarm name ${alarmName} not found`);
 
   const alarm = alarms.MetricAlarms[0];
   // console.log(alarm);
-  if (!alarm.MetricName || !alarm.Namespace || !alarm.Statistic) return undefined;
+  if (!alarm.MetricName || !alarm.Namespace || !alarm.Statistic)
+    throw new Error(`Alarm ${alarmName} MetricName, Namespace or Statistic is not defined`);
 
   const endTime = moment();
   // calculate start time
@@ -263,8 +264,6 @@ export async function getAWSCloudWatchAlarmGraphOptions(
     endTime: endTime.toDate(),
     period: alarm.Period || 300,
   });
-
-  if (!result) return undefined;
 
   result.alarmStates = alarmStates;
   result.title = `${alarmName} - ${result.title}`;
@@ -452,12 +451,4 @@ export async function generateGraph(
 
   const stream = canvasRenderService.renderToStream(configuration);
   return { stream };
-}
-
-export async function generateAWSCloudWatchAlarmGraph(region: string, alarmName: string): Promise<Stream | undefined> {
-  const options = await getAWSCloudWatchAlarmGraphOptions(region, alarmName);
-  if (!options) return undefined;
-  // console.log(options);
-  const { stream } = await generateGraph(options);
-  return stream;
 }

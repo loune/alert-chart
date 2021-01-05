@@ -1,10 +1,5 @@
 import fs from 'fs';
-import {
-  generateAWSCloudWatchAlarmGraph,
-  generateGraph,
-  GenerateGraphOptions,
-  getAWSCloudWatchAlarmGraphOptions,
-} from './alert-chart';
+import { generateGraph, GenerateGraphOptions, getAWSCloudWatchAlarmGraphOptions } from './alert-chart';
 
 jest.setTimeout(30000);
 
@@ -52,7 +47,8 @@ test('generate chart buffer with alarm', async () => {
 });
 
 test('generate chart stream from AWS CloudWatch alarm', async () => {
-  const stream = await generateAWSCloudWatchAlarmGraph(testRegion, testAlarm);
+  const options = await getAWSCloudWatchAlarmGraphOptions(testRegion, testAlarm, 86400 * 5);
+  const { stream } = await generateGraph({ ...options });
   expect(stream).toBeDefined();
   if (!stream) return;
   const filename = `test${Date.now()}.png`;
@@ -63,9 +59,7 @@ test('generate chart stream from AWS CloudWatch alarm', async () => {
 });
 
 test('generate chart buffer from AWS CloudWatch alarm', async () => {
-  const options = await getAWSCloudWatchAlarmGraphOptions(testRegion, testAlarm);
-  expect(options).toBeDefined();
-  if (!options) return;
+  const options = await getAWSCloudWatchAlarmGraphOptions(testRegion, testAlarm, 86400 * 5);
   const { buffer } = await generateGraph({ outputFormat: 'buffer', ...options });
   expect(buffer?.byteLength).toBeGreaterThan(10);
 });
