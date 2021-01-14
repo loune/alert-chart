@@ -1,6 +1,6 @@
 {
   "name": "alert-chart",
-  "version": "1.0.0",
+  "version": "0.0.0",
   "main": "dist/alert-chart.js",
   "engines": {
     "node": ">=12.14"
