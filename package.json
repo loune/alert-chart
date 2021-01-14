@@ -1,7 +1,7 @@
 {
   "name": "alert-chart",
   "version": "1.0.0",
-  "main": "dist/index.js",
+  "main": "dist/alert-chart.js",
   "engines": {
     "node": ">=12.14"
   },
@@ -17,11 +17,29 @@
     "prepublish": "yarn build",
     "start": "yarn build && node dist/test-app.js"
   },
-  "repository": "https://github.com/loune/alert-chart",
-  "author": "Loune",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/loune/alert-chart.git"
+  },
+  "bugs": {
+    "url": "https://github.com/loune/snap-push/issues"
+  },
+  "homepage": "https://github.com/loune/alert-chart#readme",
+  "keywords": [
+    "chart",
+    "charts",
+    "AWS",
+    "cloudwatch"
+  ],
+  "author": "Loune Lam",
   "license": "MIT",
   "peerDependencies": {
     "aws-sdk": "^2.817.0"
+  },
+  "peerDependenciesMeta": {
+    "aws-sdk": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/chart.js": "^2.9.29",

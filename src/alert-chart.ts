@@ -16,11 +16,19 @@ type AlarmState = 'OK' | 'Alarm' | 'Insufficient';
 
 type GenerateGraphOptionsThreshold = 'lt' | 'gt' | 'gte' | 'lte' | 'eq';
 
+const defaultPeriod = 300;
+
 const colors = {
+  orange: 'rgb(255, 127, 80)',
   red: 'rgb(255, 99, 132)',
   red05: 'rgba(255, 99, 132, 0.5)',
   blue: 'rgb(54, 162, 235)',
 };
+
+interface DateValueXY {
+  x: Date;
+  y: number;
+}
 
 export interface GenerateGraphOptions {
   title?: string;
@@ -28,6 +36,8 @@ export interface GenerateGraphOptions {
   chartHeight?: number;
   alarmStates?: {
     time: Date;
+    /** Time which the state change begins (e.g. start of a series of intervals that led to state change) */
+    beginTime?: Date;
     oldState: AlarmState;
     newState: AlarmState;
   }[];
@@ -230,6 +240,10 @@ export async function getAWSCloudWatchAlarmGraphOptions(
     })
     .promise();
 
+  // console.log(startTime.toDate());
+
+  // console.log(alarmHistory.AlarmHistoryItems);
+
   const alarmStates = alarmHistory.AlarmHistoryItems?.map((historyItem) => {
     const data = JSON.parse(historyItem.HistoryData || '{}');
     // console.log(data);
@@ -240,14 +254,24 @@ export async function getAWSCloudWatchAlarmGraphOptions(
       ? moment(data.newState.stateReasonData.startDate)
       : undefined;
 
-    if (oldStateStartDate && startTime.toDate().getTime() > oldStateStartDate.toDate().getTime()) {
-      startTime = oldStateStartDate;
+    if (
+      oldStateStartDate &&
+      stateValueMap[data.oldState?.stateValue] === 'Alarm' &&
+      startTime.toDate().getTime() > oldStateStartDate.toDate().getTime()
+    ) {
+      // show all the way back to when the alarm was raised
+      const samples =
+        (endTime.toDate().getTime() - oldStateStartDate.toDate().getTime()) / (alarm.Period || defaultPeriod);
+      if (samples < 1440) {
+        startTime = oldStateStartDate;
+      }
     } else if (stateStartDate && startTime.toDate().getTime() > stateStartDate.toDate().getTime()) {
       startTime = stateStartDate;
     }
 
     return {
-      time: stateStartDate?.toDate() || historyItem.Timestamp || new Date(),
+      time: historyItem.Timestamp || new Date(),
+      beginTime: stateStartDate?.toDate(),
       oldState: stateValueMap[data.oldState.stateValue],
       newState: stateValueMap[data.newState.stateValue],
     };
@@ -263,7 +287,7 @@ export async function getAWSCloudWatchAlarmGraphOptions(
     region,
     startTime: startTime.toDate(),
     endTime: endTime.toDate(),
-    period: alarm.Period || 300,
+    period: alarm.Period || defaultPeriod,
   });
 
   result.alarmStates = alarmStates;
@@ -274,14 +298,9 @@ export async function getAWSCloudWatchAlarmGraphOptions(
   return result;
 }
 
-export async function generateGraph(
-  options: GenerateGraphOptions,
-): Promise<{ stream?: Stream; buffer?: Buffer; dataUri?: string }> {
-  const { color } = Chart.helpers;
-
-  const labels = options.points.map((point) => point.time);
-
-  const alarmStateData: { x: Date; y: number }[] = [];
+function getAlarmStateData(options: GenerateGraphOptions) {
+  const alarmStateData: DateValueXY[] = [];
+  const alarmBeginStateData: DateValueXY[] = [];
   if (options.alarmStates) {
     let lastState: AlarmState = 'OK';
     const startTime = options.startTime || options.points[0]?.time;
@@ -292,16 +311,22 @@ export async function generateGraph(
         if (alarmStateData.length === 0) {
           alarmStateData.push({ x: startTime, y: lastState === 'Alarm' ? 1 : NaN });
         }
+        if (alarmBeginStateData.length === 0) {
+          alarmBeginStateData.push({ x: startTime, y: lastState === 'Alarm' ? 1 : NaN });
+        }
 
         if (state.newState === 'Alarm') {
           alarmStateData.push({ x: state.time, y: 1 });
+          alarmBeginStateData.push({ x: state.beginTime || state.time, y: 1 });
         }
 
         if (state.newState === 'OK') {
           if (lastState === 'Alarm') {
             alarmStateData.push({ x: new Date(state.time.getTime() - 1), y: 1 });
+            alarmBeginStateData.push({ x: new Date((state.beginTime || state.time).getTime() - 1), y: 1 });
           }
           alarmStateData.push({ x: state.time, y: NaN });
+          alarmBeginStateData.push({ x: state.beginTime || state.time, y: NaN });
         }
       }
 
@@ -310,9 +335,23 @@ export async function generateGraph(
     }
 
     alarmStateData.push({ x: options.endTime || lastTime, y: lastState === 'Alarm' ? 1 : NaN });
+    alarmBeginStateData.push({ x: options.endTime || lastTime, y: lastState === 'Alarm' ? 1 : NaN });
   }
+  return { alarmStateData, alarmBeginStateData };
+}
 
+export async function generateGraph(
+  options: GenerateGraphOptions,
+): Promise<{ stream?: Stream; buffer?: Buffer; dataUri?: string }> {
+  const { color } = Chart.helpers;
+
+  const labels = options.points.map((point) => point.time);
+
+  const { alarmStateData, alarmBeginStateData } = getAlarmStateData(options);
+
+  // console.log(options);
   // console.log(alarmStateData);
+  // console.log(alarmBeginStateData);
 
   let suggestedMax: number | undefined;
   let suggestedMin: number | undefined;
@@ -365,11 +404,12 @@ export async function generateGraph(
             options.alarmThresholdValue !== undefined
               ? Array(options.points.length).fill(options.alarmThresholdValue)
               : [],
+          yAxisID: 'default',
         },
         {
           type: 'line',
-          label: 'Alarm',
-          backgroundColor: color(colors.red).alpha(0.4).rgbString(),
+          label: 'Alarm Notification',
+          backgroundColor: color(colors.red).alpha(0.3).rgbString(),
           borderWidth: 0,
           borderColor: colors.red,
           radius: 0,
@@ -377,6 +417,18 @@ export async function generateGraph(
           fill: 'start',
           yAxisID: 'alarm',
           data: alarmStateData,
+        },
+        {
+          type: 'line',
+          label: 'Alarm Actual',
+          backgroundColor: color(colors.orange).alpha(0.3).rgbString(),
+          borderWidth: 0,
+          borderColor: colors.red,
+          radius: 0,
+          lineTension: 0,
+          fill: 'start',
+          yAxisID: 'alarm-actual',
+          data: alarmBeginStateData,
         },
       ],
     },
@@ -398,6 +450,14 @@ export async function generateGraph(
           },
           {
             id: 'alarm',
+            display: false,
+            ticks: {
+              suggestedMin: 0,
+              suggestedMax: 1,
+            },
+          },
+          {
+            id: 'alarm-actual',
             display: false,
             ticks: {
               suggestedMin: 0,
