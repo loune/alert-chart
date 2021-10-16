@@ -10,9 +10,11 @@ import 'chartjs-adapter-moment';
 const localTimezone = 'Australia/Sydney';
 moment.tz.setDefault(localTimezone);
 
-['CanvasRenderingContext2D', 'CanvasPattern', 'CanvasGradient'].forEach((obj) => {
-  (global as any)[obj] = (Canvas as any)[obj];
-});
+if (typeof global !== 'undefined') {
+  ['CanvasPattern', 'CanvasGradient'].forEach((obj) => {
+    (global as any)[obj] = (Canvas as any)[obj];
+  });
+}
 
 type AlarmState = 'OK' | 'Alarm' | 'Insufficient';
 
@@ -347,9 +349,7 @@ function getAlarmStateData(options: GenerateGraphOptions) {
   return { alarmStateData, alarmBeginStateData };
 }
 
-export async function generateGraph(
-  options: GenerateGraphOptions,
-): Promise<{ stream?: Stream; buffer?: Buffer; dataUri?: string }> {
+export function getChartJsConfiguration(options: GenerateGraphOptions): ChartConfiguration {
   const labels = options.points.map((point) => point.time);
 
   const { alarmStateData, alarmBeginStateData } = getAlarmStateData(options);
@@ -483,6 +483,14 @@ export async function generateGraph(
       },
     },
   };
+
+  return configuration;
+}
+
+export async function generateGraph(
+  options: GenerateGraphOptions,
+): Promise<{ stream?: Stream; buffer?: Buffer; dataUri?: string }> {
+  const configuration = getChartJsConfiguration(options);
 
   const canvasRenderService = getCanvasRenderingService(options.chartWidth || 800, options.chartHeight || 480);
 
