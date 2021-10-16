@@ -8,6 +8,7 @@ const testAlarm = 'TestAlarm';
 
 test('generate chart buffer', async () => {
   const options: GenerateGraphOptions = {
+    title: 'generate chart buffer',
     points: [
       { time: new Date(2020, 11, 10), value: 10 },
       { time: new Date(2020, 11, 11), value: 10 },
@@ -25,6 +26,7 @@ test('generate chart buffer', async () => {
 
 test('generate chart buffer with alarm', async () => {
   const options: GenerateGraphOptions = {
+    title: 'generate chart buffer with alarm',
     points: [
       { time: new Date(2020, 11, 10), value: 10 },
       { time: new Date(2020, 11, 11), value: 10 },

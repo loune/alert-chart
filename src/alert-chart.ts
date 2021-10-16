@@ -1,9 +1,11 @@
-import { CanvasRenderService } from 'chartjs-node-canvas';
-import Chart from 'chart.js';
+import { ChartJSNodeCanvas } from 'chartjs-node-canvas';
+import { Chart, ChartConfiguration } from 'chart.js/auto';
+import { color } from 'chart.js/helpers';
 import moment from 'moment-timezone';
 import Canvas from 'canvas';
 import { CloudWatch } from 'aws-sdk';
 import Stream from 'stream';
+import 'chartjs-adapter-moment';
 
 const localTimezone = 'Australia/Sydney';
 moment.tz.setDefault(localTimezone);
@@ -60,26 +62,31 @@ function getThresholdAreaPattern() {
   return canvas;
 }
 
-function getCanvasRenderingService(width: number, height: number): CanvasRenderService {
-  const canvasRenderService = new CanvasRenderService(width, height, (ChartJS) => {
-    ChartJS.defaults.global.defaultFontColor = 'black';
-    ChartJS.defaults.global.defaultFontFamily = 'Arial';
-    ChartJS.plugins.register({
-      beforeDraw: (chartInstance: any) => {
-        chartInstance.chart.ctx.fillStyle = 'white';
-        chartInstance.chart.ctx.fillRect(0, 0, chartInstance.chart.width, chartInstance.chart.height);
-      },
-    });
+function getCanvasRenderingService(width: number, height: number): ChartJSNodeCanvas {
+  const canvasRenderService = new ChartJSNodeCanvas({
+    width,
+    height,
+    chartCallback: (ChartJS) => {
+      ChartJS.defaults.color = 'black';
+      ChartJS.defaults.font.family = 'Arial';
+      ChartJS.register([
+        {
+          id: 'alertChartCustom',
+          beforeInit: (chartInstance: Chart) => {
+            const thresholdPattern = chartInstance.ctx.createPattern(getThresholdAreaPattern() as any, 'repeat');
+            const configuration = chartInstance.config;
+            if (configuration.data && configuration.data.datasets) {
+              (configuration.data.datasets[1] as any).backgroundColor = thresholdPattern;
+            }
+          },
+          beforeDraw: (chartInstance: Chart) => {
+            chartInstance.ctx.fillStyle = 'white';
+            chartInstance.ctx.fillRect(0, 0, chartInstance.width, chartInstance.height);
+          },
+        } as any,
+      ]);
+    },
   });
-
-  // eslint-disable-next-line no-underscore-dangle
-  const originalCreateCanvas: any = (canvasRenderService as any)._createCanvas;
-  // eslint-disable-next-line no-underscore-dangle
-  (canvasRenderService as any)._createCanvas = (...args: any[]) => {
-    const canvas = originalCreateCanvas.apply(canvasRenderService, args);
-    (canvasRenderService as any).overrideConfigurationWithCanvas?.(canvas);
-    return canvas;
-  };
 
   return canvasRenderService;
 }
@@ -343,8 +350,6 @@ function getAlarmStateData(options: GenerateGraphOptions) {
 export async function generateGraph(
   options: GenerateGraphOptions,
 ): Promise<{ stream?: Stream; buffer?: Buffer; dataUri?: string }> {
-  const { color } = Chart.helpers;
-
   const labels = options.points.map((point) => point.time);
 
   const { alarmStateData, alarmBeginStateData } = getAlarmStateData(options);
@@ -379,7 +384,7 @@ export async function generateGraph(
     }
   }
 
-  const configuration: Chart.ChartConfiguration = {
+  const configuration: ChartConfiguration = {
     type: 'line',
     data: {
       labels,
@@ -387,11 +392,11 @@ export async function generateGraph(
         {
           type: 'line',
           label: options.pointsLabel,
-          lineTension: 0,
+          tension: 0,
           backgroundColor: color(colors.red).alpha(0).rgbString(),
           borderColor: colors.blue,
           data: options.points.map((point) => point.value),
-          yAxisID: 'default',
+          yAxisID: 'yDefault',
         },
         {
           type: 'line',
@@ -399,12 +404,12 @@ export async function generateGraph(
           borderColor: colors.red,
           fill: thresholdFill,
           borderWidth: 2,
-          radius: 0,
+          pointRadius: 0,
           data:
             options.alarmThresholdValue !== undefined
               ? Array(options.points.length).fill(options.alarmThresholdValue)
               : [],
-          yAxisID: 'default',
+          yAxisID: 'yDefault',
         },
         {
           type: 'line',
@@ -412,11 +417,11 @@ export async function generateGraph(
           backgroundColor: color(colors.red).alpha(0.3).rgbString(),
           borderWidth: 0,
           borderColor: colors.red,
-          radius: 0,
-          lineTension: 0,
+          pointRadius: 0,
+          tension: 0,
           fill: 'start',
-          yAxisID: 'alarm',
-          data: alarmStateData,
+          yAxisID: 'yAlarm',
+          data: alarmStateData as any,
         },
         {
           type: 'line',
@@ -424,68 +429,57 @@ export async function generateGraph(
           backgroundColor: color(colors.orange).alpha(0.3).rgbString(),
           borderWidth: 0,
           borderColor: colors.red,
-          radius: 0,
-          lineTension: 0,
+          pointRadius: 0,
+          tension: 0,
           fill: 'start',
-          yAxisID: 'alarm-actual',
-          data: alarmBeginStateData,
+          yAxisID: 'yAlarmActual',
+          data: alarmBeginStateData as any,
         },
       ],
     },
     options: {
-      title: {
-        display: !!options.title,
-        text: options.title,
+      plugins: {
+        title: {
+          display: !!options.title,
+          text: options.title,
+        },
       },
       scales: {
-        yAxes: [
-          {
-            id: 'default',
-            display: true,
-            ticks: {
-              callback: (num: number) => num.toLocaleString('en'),
-              suggestedMin,
-              suggestedMax,
+        yDefault: {
+          display: true,
+          ticks: {
+            callback: (num) => num.toLocaleString('en'),
+          },
+          suggestedMin,
+          suggestedMax,
+        },
+        yAlarm: {
+          display: false,
+          suggestedMin: 0,
+          suggestedMax: 1,
+        },
+        yAlarmActual: {
+          display: false,
+          suggestedMin: 0,
+          suggestedMax: 1,
+        },
+        x: {
+          type: 'time',
+          display: true,
+          min: options.startTime,
+          max: options.endTime,
+          time: {
+            // format: timeFormat,
+            // round: 'day'
+            tooltipFormat: 'DD/MM HH:mm',
+            displayFormats: {
+              millisecond: 'DD/MM T HH:mm:ss.SSS',
+              second: 'DD/MM T HH:mm:ss',
+              minute: 'DD/MM T HH:mm',
+              hour: 'DD/MM T HH:00',
             },
           },
-          {
-            id: 'alarm',
-            display: false,
-            ticks: {
-              suggestedMin: 0,
-              suggestedMax: 1,
-            },
-          },
-          {
-            id: 'alarm-actual',
-            display: false,
-            ticks: {
-              suggestedMin: 0,
-              suggestedMax: 1,
-            },
-          },
-        ],
-        xAxes: [
-          {
-            type: 'time',
-            display: true,
-            ticks: {
-              min: options.startTime,
-              max: options.endTime,
-            },
-            time: {
-              // format: timeFormat,
-              // round: 'day'
-              tooltipFormat: 'DD/MM HH:mm',
-              displayFormats: {
-                millisecond: 'DD/MM T HH:mm:ss.SSS',
-                second: 'DD/MM T HH:mm:ss',
-                minute: 'DD/MM T HH:mm',
-                hour: 'DD/MM T HH:00',
-              },
-            },
-          },
-        ],
+        } as any,
       },
     },
   };
@@ -501,14 +495,6 @@ export async function generateGraph(
     const dataUri = await canvasRenderService.renderToDataURL(configuration);
     return { dataUri };
   }
-
-  // hack to get access to the canvas context so we could create a pattern
-  (canvasRenderService as any).overrideConfigurationWithCanvas = (canvas: Canvas.Canvas) => {
-    const thresholdPattern = canvas.getContext('2d').createPattern(getThresholdAreaPattern(), 'repeat');
-    if (configuration.data && configuration.data.datasets) {
-      configuration.data.datasets[1].backgroundColor = thresholdPattern;
-    }
-  };
 
   const stream = canvasRenderService.renderToStream(configuration);
   return { stream };
